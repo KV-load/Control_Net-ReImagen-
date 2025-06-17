@@ -82,6 +82,7 @@ class CrossAttentionBlock(nn.Module):
         # Reshape for attention
         query_flat = query.view(B, C, H*W).permute(0, 2, 1)
         context_flat = context.view(B, C, H*W).permute(0, 2, 1)
+        # scaling_factor = 1 / (query_flat.size(-1) ** 0.5)
         
         # Attention with residual
         attn_out, _ = self.attn(
@@ -89,6 +90,7 @@ class CrossAttentionBlock(nn.Module):
             key=context_flat,
             value=context_flat
         )
+        # attn_out = attn_out * scaling_factor  # Scale attention output
         attn_out = self.norm(attn_out + query_flat)  # Add residual
         
         # Reshape back and project
@@ -151,7 +153,6 @@ class ReImagen(nn.Module):
 
         self.cross_attn = self.cross_attn.to(ctrl_unet_device)
 
-
         # Converge the text condition and similar image embedding
         self.converge = nn.Sequential(nn.Linear(768*3, 768*2),
                                       nn.SiLU(),
@@ -159,6 +160,8 @@ class ReImagen(nn.Module):
                                       nn.LayerNorm(768),
                                      )
         self.converge = self.converge.to(org_unet_device)
+
+
 
         # Zero Convolution layers for Down blocks
         self.ctrl_unet_down_zero_convs_resnet = nn.ModuleList([
@@ -323,22 +326,30 @@ class ReImagen(nn.Module):
                 # print("Cross attention happening ",ctrl_unet_out.shape," === ",similar_img_one.shape,similar_img_two.shape)
                 attn1 = self.cross_attn[0][idx](ctrl_unet_out,similar_img_one)
                 attn2 = self.cross_attn[1][idx](ctrl_unet_out,similar_img_two)
-                ctrl_unet_out = (attn1 + attn2)/2
 
+                # print("ctrl_unet_out min max mean",ctrl_unet_out.min().item(),ctrl_unet_out.max().item(),ctrl_unet_out.mean().item())
+                ctrl_unet_out = (attn1 + attn2)
+                ctrl_unet_out = F.layer_norm(ctrl_unet_out, ctrl_unet_out.shape[1:])  # Layer normalization
+
+                # print("Cross attentiond done",ctrl_unet_out.min().item(),ctrl_unet_out.max().item(),ctrl_unet_out.mean().item())
                 res_attn_one_0 = self.cross_attn[0][idx](res_samples[0],sim_res_one[0])
                 res_attn_one_1 = self.cross_attn[0][idx](res_samples[1],sim_res_one[1])
 
                 res_attn_two_0 = self.cross_attn[1][idx](res_samples[0],sim_res_two[0])
                 res_attn_two_1 = self.cross_attn[1][idx](res_samples[1],sim_res_two[1])
                 
-                res_samples[0] = (res_attn_one_0 + res_attn_one_1)/2
-                res_samples[1] = (res_attn_two_0 + res_attn_two_1)/2
+                res_samples[0] = (res_attn_one_0 + res_attn_two_0)
+                res_samples[1] = (res_attn_one_1 + res_attn_two_1)
+
+                res_samples[0] = F.layer_norm(res_samples[0], res_samples[0].shape[1:])  # Layer normalization
+                res_samples[1] = F.layer_norm(res_samples[1], res_samples[1].shape[1:])  # Layer normalization
                 
                 if(res_samples_len==3):
                     
                     res_samples_three_0 = self.cross_attn[0][idx](res_samples[2],sim_res_one[2])
                     res_samples_three_1 = self.cross_attn[1][idx](res_samples[2],sim_res_two[2])
-                    res_samples[2] = (res_samples_three_0 + res_samples_three_1)/2
+                    res_samples[2] = (res_samples_three_0 + res_samples_three_1)
+                    res_samples[2] = F.layer_norm(res_samples[2], res_samples[2].shape[1:])
                     res_samples = (res_samples[0],res_samples[1],res_samples[2]) # again converting it into a tuple
                 else:
                     res_samples = (res_samples[0],res_samples[1])
@@ -376,7 +387,7 @@ class ReImagen(nn.Module):
         
         # Apply zero conv to control mid output and add to original mid output
         ctrl_mid_out = self.ctrl_unet_mid_zero_convs(ctrl_mid_out)
-        ctrl_mid_out = ctrl_mid_out.to(org_unet_device,non_blocking=True)
+        ctrl_mid_out = ctrl_mid_out.to(org_unet_device)
          # for proper gradient flow
         
         # org_mid_out = org_mid_out.to(ctrl_unet_device,non_blocking=True)  # Ensure both are on the same device
@@ -389,7 +400,7 @@ class ReImagen(nn.Module):
         combined_down_block_res_samples = []
         for org_res, ctrl_res in zip(down_block_res_samples, ctrl_down_block_res_samples):
             assert org_res.shape == ctrl_res.shape, f"Shape mismatch: {org_res.shape} vs {ctrl_res.shape}"
-            ctrl_res = ctrl_res.to(org_unet_device,non_blocking=True)
+            ctrl_res = ctrl_res.to(org_unet_device)
             # org_res = org_res.to(ctrl_unet_device)  # Ensure both are on the same device
             combined_down_block_res_samples.append(org_res + ctrl_res)
     
@@ -453,6 +464,7 @@ class ReImagen(nn.Module):
         org_unet_out = self.org_unet.conv_act(org_unet_out)
         org_unet_out = self.org_unet.conv_out(org_unet_out)
         
+        # print("Final output shape:", org_unet_out.min().item(), org_unet_out.max().item(), org_unet_out.mean().item())
         del ctrl_down_block_res_samples,down_block_res_samples
         # print("up block process done===============",torch.cuda.memory_summary())
         
